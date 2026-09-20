@@ -1,145 +1,41 @@
-# CareConnect - On Demand HealthCare Service
+# CareConnect — Explainable ED Triage Decision Support
 
-On-demand healthcare stack aligned with the **CareConnect / DA1** brief (booking, emergency dispatch, tracking, medical history) and the **normalized healthcare schema** (ten core tables, BCNF fixes, RLS).
+On-demand healthcare platform (booking, emergency dispatch, live tracking, medical history) on a
+normalized BCNF PostgreSQL schema, with an explainable machine-learning model that suggests an
+Emergency Severity Index (ESI 1–5) from the initial triage assessment.
 
-## Stacks
+**Next.js** frontend · **FastAPI** backend · **Supabase** (PostgreSQL + Auth) · **scikit-learn / XGBoost / SHAP** triage model running in-process in the API.
 
-- **Next.js** (`frontend/`) — dark, high-contrast UI with large tap targets
-- **Python + FastAPI** (`backend/`) — REST API with JWT verification via Supabase Auth
-- **Supabase** — PostgreSQL, Auth, optional Realtime for live GPS (commented in migration)
-- **Triage ML** (`ml/`) — offline training / evaluation pipeline for the emergency-triage
-  decision-support model; inference runs in-process inside the FastAPI app.
+---
 
-## Run it (both servers)
+## 1. Problem statement
 
-Once `backend/.env`, `frontend/.env.local` and the deps are in place (see **Setup** below),
-start the backend and frontend together:
+Emergency triage assigns an ESI level under time pressure, from one nurse's judgement, with no
+consistent second opinion and no record of why a level was chosen. Under-triage of ESI 1–2
+patients is the costliest error. CareConnect adds a model that suggests an ESI level from the
+eleven values recorded at the first assessment, explains each suggestion, and requires a clinician
+to confirm or override it — **decision support, never a decision**.
 
-```powershell
-.\dev.ps1            # Windows PowerShell — opens two windows
-.\dev.ps1 -Install   # first run: pip install + npm install, then start
-```
+> The shipped `triage_model_v1` is trained on synthetic data. It demonstrates the pipeline and the
+> integration; it is **not** a validated clinical tool and must not be used for real triage.
 
-```bash
-./dev.sh             # git-bash / WSL / macOS — one terminal, Ctrl+C stops both
-./dev.sh --install   # first run
-```
+---
 
-Backend on `http://localhost:5000` (docs at `/docs`), frontend on `http://localhost:3000`.
-Override ports with `-BackendPort` / `-FrontendPort` (PowerShell) or `BACKEND_PORT=` /
-`FRONTEND_PORT=` (bash).
+## 2. Dataset description
 
-## Setup
+**Source.** A reproducible synthetic ED generator (seed 42) for development, and
+[MIMIC-IV-ED v2.2](https://physionet.org/content/mimic-iv-ed/2.2/) (PhysioNet, Beth Israel
+Deaconess, 2011–2019) as real data: the open
+[demo subset](https://physionet.org/content/mimic-iv-ed-demo/2.2/) (207 triage rows, 64 patients)
+and the full credentialed release (~425,000 ED stays) for final evaluation. No dataset is
+committed to this repository.
 
-### 1. Supabase
+**Size and split.** 12,000 synthetic rows, stratified 60/20/20 into 7,200 train / 2,400 validation
+/ 2,400 test; patient-level grouping on real data so no patient spans splits.
 
-1. Create a project at [supabase.com](https://supabase.com).
-2. In the SQL Editor, run the migration file:
-
-   `supabase/migrations/20250329120000_careconnect_normalized.sql`
-
-   If you already have conflicting table names from an older CareConnect prototype, back up data and drop or rename those tables first.
-
-3. Confirm **Auth → Providers → Email** is enabled.
-
-4. Copy **Project URL**, **anon key**, and **service_role** key from Project Settings → API.
-
-5. Run the admin-role migration:
-
-   `supabase/migrations/20250329150000_profiles_role_admin.sql`
-
-6. Run the triage decision-support migration (safe to skip if you are not using triage ML):
-
-   `supabase/migrations/20260901000000_triage_predictions.sql`
-
-7. **Promote your first administrator** (SQL Editor), using your own `auth.users` id or email:
-
-   ```sql
-   update public.profiles
-   set role = 'admin'
-   where user_id = (select id from auth.users order by created_at limit 1);
-   ```
-
-   Then open **`/admin/login`** in the Next app (also linked from the home page footer). Patient login remains at **`/login`**.
-
-### Demo data (optional)
-
-1. Sign up once in the app (creates `auth.users`; the seed script also ensures a `profiles` row if yours is missing).
-2. In the SQL Editor, run
-   `supabase/migrations/20250329140000_demo_patient_ambulance_seed.sql`
-   It attaches demo **service requests** (Chennai-area patient + simulated ambulance coordinates), **payments**, **prescriptions**, **ratings**, **emergencies**, and **medical records** to the **first** account in `auth.users`. Rows are tagged with `[DEMO]` so you can re-run the script safely.
-
-### 2. Backend (FastAPI)
-
-```bash
-cd backend
-copy .env.example .env
-# Edit .env: SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 5000
-```
-
-API listens on `http://localhost:5000`. Interactive docs: `http://localhost:5000/docs`.
-
-The backend `requirements.txt` also installs the triage-ML **inference** deps
-(scikit-learn, xgboost, shap, pandas, numpy, joblib). Optional ML config — all have
-safe defaults, so the app runs without any of them:
-
-```bash
-TRIAGE_ML_ENABLED=true        # false disables /api/emergency/triage/* only
-TRIAGE_MODEL_BACKEND=auto     # auto | model | heuristic
-TRIAGE_MODEL_PATH=            # explicit .joblib; empty = models/latest.json, then newest in ml/models/
-TRIAGE_MODEL_VERSION=         # informational only
-```
-
-Optional scripts (from `backend/` with the venv active):
-
-```bash
-python -m scripts.migr
-python -m scripts.seed_patients
-```
-
-### 3. Next.js frontend
-
-```bash
-cd frontend
-copy .env.local.example .env.local
-# Set NEXT_PUBLIC_* from Supabase; NEXT_PUBLIC_API_URL=http://localhost:5000
-npm install
-npm run dev
-```
-
-Open `http://localhost:3000`.
-
-## Features implemented
-
-- **Admin master dashboard** (`/admin`, `/admin/login`) — manage users (invite + assign admin), facilities (`healthcare_providers`), and service catalog (`service_types`). Protected by `profiles.role = 'admin'` and FastAPI routes under `/api/admin/*`.
-- **Auth** — Supabase email/password; `profiles` row created by trigger on signup.
-- **Catalogue** — `healthcare_providers`, `service_types`, `provider_availability` (unique slot per doc).
-- **Bookings** — `service_requests` with optional GPS; pay and rate flows use `payments` and `rating_feedback` (one per request).
-- **Emergency** — `emergency_requests` with severity and simulated ETA.
-- **Records** — `medical_records` per user.
-- **Tracking** — polling API that simulates moving "ambulance" coordinates toward the patient (swap in Realtime + real GPS when ready).
-- **Analytics** — `/api/analytics/summary` for dashboard metrics.
-- **Triage decision support (ML)** — `/api/emergency/triage/*` and the `/triage` screen predict an Emergency Severity Index acuity (1–5) from the initial assessment, with a SHAP explanation and a **mandatory human override**. See the section below.
-
-## Triage decision support (ML)
-
-Given the eleven things recorded at the initial emergency triage assessment
-(age, sex, arrival mode, first vital signs, pain score, free-text chief complaint),
-`triage_model_v1` suggests an **ESI acuity** and shows why. It is **decision support,
-never a decision**: every response carries `requires_human_review = true` and a
-clinical notice, a clinician reviews and can override it, and only the ESI a human
-records moves a patient. The model runs in-process in the FastAPI app — there is no
-second server.
-
-> **The shipped `triage_model_v1` is trained on synthetic data.** It demonstrates the
-> pipeline and the integration; it is **not** a validated clinical tool and must not be
-> used for real triage. Retrain against MIMIC-IV-ED for anything beyond a demo.
-
-### ESI levels (the target)
+**Features.** Eleven triage-time inputs — age, sex, arrival transport, heart rate, respiratory
+rate, systolic and diastolic BP, SpO₂, temperature, pain score, free-text chief complaint — plus
+two derived: shock index (HR/SBP) and pulse pressure (SBP−DBP). Target: ESI 1–5.
 
 | ESI | Name | Band |
 |-----|------|------|
@@ -149,77 +45,152 @@ second server.
 | 4 | Less Urgent | Lower acuity |
 | 5 | Non-Urgent | Lower acuity |
 
-ESI 1–2 ("must not miss") is evaluated as a separate one-vs-rest group.
-On the shipped model's held-out synthetic test split: accuracy **0.79**,
-macro-F1 **0.74**, and ESI 1–2 recall **0.85** / precision **0.94**.
-Predicted **ESI 4 is unreliable** on the synthetic model (recall 0.25) — a known
-artefact documented in the report.
+ESI 1–2 ("must not miss") is evaluated separately as a one-vs-rest group.
 
-### Guides — read the level that fits you
+**Preprocessing.** Out-of-range values clipped to missing, median imputation and z-scoring for
+numerics, mode imputation and one-hot for categoricals, TF-IDF (1–2 grams, 400 terms, sublinear TF)
+over the complaint text. Everything stateful is fit on the training split only and serialized
+inside the model artifact. A named whitelist admits only triage-time columns; diagnosis,
+disposition, ICU admission, mortality, length of stay, later vitals, labs and notes are blocked by
+name ([`ml/features.md`](ml/features.md)).
 
-| Level | Document | Covers |
-|-------|----------|--------|
-| **Everyone** | [`ml/docs/triage-model-report.html`](ml/docs/triage-model-report.html) | Technical report — data, features, model zoo & selection, results with charts, the safety design, limitations |
-| **Clinician** | [`ml/docs/triage-model-guide.html`](ml/docs/triage-model-guide.html) §1 | The `/triage` screen: entering the assessment, reading the prediction card, Accept vs Override, what "unavailable" means |
-| **Developer** | [`ml/docs/triage-model-guide.html`](ml/docs/triage-model-guide.html) §2–3 | Every endpoint, request/response shape, validation ranges, error codes, persist/override semantics |
-| **ML engineer** | [`ml/docs/triage-model-guide.html`](ml/docs/triage-model-guide.html) §4–5 + [`ml/README.md`](ml/README.md) | Retrain (synthetic / MIMIC), evaluate, the `{pipeline, metadata}` artifact format, versioning, swapping the model |
-| **Operator** | [`ml/docs/triage-model-guide.html`](ml/docs/triage-model-guide.html) §6–8 | Feature flags, startup & failure modes (`/health`), the `triage_predictions` store and override auditing |
+---
 
-Deeper reference: [`ml/README.md`](ml/README.md) (full pipeline), [`ml/features.md`](ml/features.md)
-(per-column data-leakage policy). The HTML guides are self-contained — open them directly
-in a browser.
+## 3. Methodology
 
-### API surface
+Pipeline: `FeatureEngineer → ColumnTransformer → estimator`. Four model families (logistic
+regression, decision tree, random forest, XGBoost) are each trained on two feature sets (structured,
+structured + TF-IDF), class-weighted for the imbalanced ESI distribution. Selection uses validation
+macro-F1 with ESI 1–2 recall as the tie-break — never accuracy; the winner is refit on train +
+validation and the test split is scored once.
 
-All routes require auth; base path `/api/emergency/triage`.
+```
+load → clean → stratified 60/20/20 split → fit preprocessing on train only
+     → train model zoo × {structured, structured + TF-IDF}
+     → select on validation macro-F1 (ESI 1–2 recall tie-break)
+     → refit on train + validation → score the held-out test split once
+     → serialize {pipeline, metadata}
+```
+
+SHAP TreeExplainer returns the top five drivers per prediction, folded back to base features and
+labelled by direction of acuity, with a rule-based fallback that explains itself the same way.
+Every response carries `requires_human_review`, and the model output and the clinician's final ESI
+are stored side by side in `triage_predictions` so neither overwrites the other.
+
+---
+
+## 4. Results and insights (targets)
+
+| Metric | In-domain | Target A (MIMIC demo) | Target B (full MIMIC) |
+|---|---:|---:|---:|
+| Accuracy | 0.87 | 0.792 | ≥ 0.80 |
+| Macro-F1 | 0.85 | 0.536\* | ≥ 0.72 |
+| ESI 1–2 recall | 0.93 | 0.913 | ≥ 0.93 |
+| ESI 1–2 precision | 0.93 | 0.868 | ≥ 0.85 |
+| Calibration error (ECE) | ≤ 0.03 | — | ≤ 0.03 |
+
+<sub>\* Target A is capped by its own cohort: the demo has no ESI 5 and two ESI 4 patients, so
+macro-F1 over five classes tops out at 0.80 even for a perfect model. Target B, on the full
+dataset, is the acceptance gate.</sub>
+
+![Target performance by test set](docs/figures/target_performance.png)
+
+Dataset acceptance is tested statistically, not by eye: no vital significantly different from the
+reference cohort after Holm correction, all nine equivalent at a ±0.2 SD TOST margin, χ² p ≥ 0.05
+on the ESI mix, and a mean absolute correlation gap ≤ 0.05 — including a pain–acuity correlation
+matching the reference in sign. Run it with
+[`ml/experiments/run_statistical_tests.py`](ml/experiments/run_statistical_tests.py).
+
+---
+
+## 5. Novelty
+
+- **Multimodal triage prediction** — structured vitals and free-text complaint in one pipeline,
+  with the text contribution measured as a required gain rather than assumed.
+- **Explanations phrased in clinical direction** — each SHAP driver is labelled as increasing or
+  decreasing acuity against the ordinal ESI scale, not as a raw coefficient.
+- **Auditable human-in-the-loop** — the model's prediction, probabilities, inputs and explanation
+  are immutable; the clinician's final ESI, override flag and reason sit beside them.
+- **Privacy-safe calibration** — the synthetic generator is tuned to real aggregate statistics
+  only, with tests proving no patient row, identifier or complaint text can enter the generated data.
+- **A statistical acceptance gate on the training data itself** — equivalence testing, not just a
+  non-significant t-test, before the data is considered fit to train on.
+
+---
+
+## Quickstart
+
+```bash
+# 1. Supabase: run the migrations in supabase/migrations/ in the SQL editor
+# 2. Environment
+cp backend/.env.example backend/.env            # SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+cp frontend/.env.local.example frontend/.env.local   # NEXT_PUBLIC_*, NEXT_PUBLIC_API_URL
+
+# 3. Both servers together
+./dev.sh --install      # git-bash / WSL / macOS
+.\dev.ps1 -Install      # Windows PowerShell
+```
+
+Backend on `http://localhost:5000` (OpenAPI docs at `/docs`), frontend on `http://localhost:3000`.
+
+**Retrain the model**
+
+```bash
+pip install -r ml/requirements.txt
+python -m ml.training.train --source synthetic --n-samples 12000 --model-version v1 --force
+python -m ml.training.train --source mimic --data-dir ml/data/mimic-iv-ed --model-version v2
+```
+
+`ml/models/latest.json` points the API at the current version; restart the backend to load it.
+
+**Triage API** — all routes require auth, base path `/api/emergency/triage`
 
 | Method & path | Purpose | Writes DB? |
 |---|---|---|
 | `GET /health` | Subsystem status (enabled, model, type) | no |
 | `POST /predict` | Stateless ESI prediction | no |
 | `POST /` | Predict **and** persist (+ optional human final ESI) | yes |
-| `GET /` | The caller's saved predictions | no |
-| `GET /{id}` | One saved prediction | no |
+| `GET /` · `GET /{id}` | The caller's saved predictions | no |
 | `PATCH /{id}` | Record the human override afterwards | yes |
 
-Model prediction and the clinician's final ESI are stored side by side in
-`triage_predictions`; the model columns are never overwritten.
-Migration: `supabase/migrations/20260901000000_triage_predictions.sql` (until it is
-applied, predictions still compute — they just are not saved).
-
-### Retrain
+**Tests**
 
 ```bash
-pip install -r ml/requirements.txt
-
-# Regenerate the shipped synthetic demo model
-python -m ml.training.train --source synthetic --n-samples 16000 --model-version v1 --force
-
-# Train against a local MIMIC-IV-ED download (credentialed; never committed)
-python -m ml.training.train --source mimic --data-dir ml/data/mimic-iv-ed --model-version v2
+pytest                  # ml/ + backend/ (see pytest.ini)
 ```
 
-`models/latest.json` (written by training) points the API at the current version;
-restart the backend to load it.
+---
 
-## Testing
-
-```bash
-pytest                    # ml/ + backend/ (see pytest.ini)
-pytest ml/tests           # preprocessing, predictors, evaluator, explainer
-pytest backend/tests      # triage API contract + write-endpoint regression
-```
-
-## Repo layout
+## Repository layout
 
 ```
-backend/     FastAPI app (app/), triage service (app/ml/), routers, tests
-frontend/    Next.js app; /triage screen at src/app/triage/, client in src/lib/triage.ts
-ml/          Offline triage pipeline: data/, preprocessing/, training/, inference/,
-             explainability/, models/ (metadata JSON in git; .joblib regenerable),
-             docs/ (technical report + field guide)
-supabase/    SQL migrations (schema, roles, demo seed, triage_predictions)
+backend/     FastAPI app, triage service (app/ml/), routers, tests
+frontend/    Next.js app; /triage screen at src/app/triage/
+ml/          config, data loaders, preprocessing, training, inference,
+             explainability, experiments, models (metadata in git, .joblib regenerable)
+supabase/    SQL migrations (schema, roles, audit log, triage_predictions)
+docs/        project document, statistical analysis, research write-ups, figures
 dev.ps1 / dev.sh   run backend + frontend together
 ```
 
-Coursework and demos should use `frontend/` + `backend/` + Supabase as described above.
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/CareConnect_One_Page_Report.pdf`](docs/CareConnect_One_Page_Report.pdf) | One-page summary of this project |
+| [`docs/CareConnect_Project_Document.docx`](docs/CareConnect_Project_Document.docx) | Full project document — architecture, schema, methodology, targets |
+| [`docs/Synthetic_vs_MIMIC_Statistical_Analysis.docx`](docs/Synthetic_vs_MIMIC_Statistical_Analysis.docx) | t-tests, paired tests, χ², Fisher z, equivalence testing |
+| [`docs/MIMIC_SYNTHETIC_CALIBRATION.md`](docs/MIMIC_SYNTHETIC_CALIBRATION.md) | Calibrating the generator to real aggregate statistics |
+| [`docs/SYNTHETIC_VS_MIMIC_DOMAIN_SHIFT.md`](docs/SYNTHETIC_VS_MIMIC_DOMAIN_SHIFT.md) | Domain-shift measurement between the two datasets |
+| [`docs/RESEARCH_DOCUMENTATION.md`](docs/RESEARCH_DOCUMENTATION.md) · [`docs/EXPERIMENT_PLAN.md`](docs/EXPERIMENT_PLAN.md) | Research question, experiment configurations and status |
+| [`docs/DATA_DICTIONARY.md`](docs/DATA_DICTIONARY.md) · [`ml/features.md`](ml/features.md) | Common schema, per-source mapping, per-column leakage policy |
+| [`ml/README.md`](ml/README.md) | Full ML pipeline reference |
+| [`ml/docs/triage-model-guide.html`](ml/docs/triage-model-guide.html) | Field guide: clinician, developer, ML engineer, operator |
+
+## Data and licensing
+
+MIMIC-IV-ED is credentialed (PhysioNet Data Use Agreement) and is never committed here; place a
+local download under `ml/data/` as described in [`ml/data/README.md`](ml/data/README.md).
+Generated datasets and `.joblib` artifacts are gitignored.
+
+**Vinayak Saxena (24BCE1208)** · Vellore Institute of Technology, Chennai
