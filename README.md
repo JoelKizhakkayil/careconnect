@@ -8,7 +8,7 @@ Emergency Severity Index (ESI 1–5) from the initial triage assessment.
 
 ---
 
-## 1. Problem statement
+## 1.Problem statement
 
 Emergency triage assigns an ESI level under time pressure, from one nurse's judgement, with no
 consistent second opinion and no record of why a level was chosen. Under-triage of ESI 1–2
@@ -193,4 +193,7 @@ MIMIC-IV-ED is credentialed (PhysioNet Data Use Agreement) and is never committe
 local download under `ml/data/` as described in [`ml/data/README.md`](ml/data/README.md).
 Generated datasets and `.joblib` artifacts are gitignored.
 
-**Vinayak Saxena (24BCE1208)** · Vellore Institute of Technology, Chennai
+## Authors & Developers
+
+* **Vinayak Saxena</inline>** - *ML Engineer* - 
+* **Joel John Kizhakkayil</inline>** - *Lead Developer* - [GitHub Profile](https://github.com/JoelKizhakkayil)
